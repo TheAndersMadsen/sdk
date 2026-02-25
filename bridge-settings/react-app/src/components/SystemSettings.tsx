@@ -2,6 +2,12 @@ import React from "react";
 import { useSettings } from "../hooks/useSettings";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { Slider } from "./Slider";
+import { LauncherSelect } from "./LauncherSelect";
+
+interface LauncherOption {
+  label: string;
+  component: string;
+}
 
 export const SystemSettings: React.FC = () => {
   const { getSystemSettings, updateSystemSetting } = useSettings();
@@ -15,9 +21,27 @@ export const SystemSettings: React.FC = () => {
     updateSystemSetting(key, value);
   };
 
+  const handleLauncherChange = (component: string) => {
+    updateSystemSetting("launcher.current", component);
+  };
+
+  const availableLaunchers = (systemSettings["launcher.available"] ?? []) as LauncherOption[];
+  const currentLauncher = (systemSettings["launcher.current"] ?? "") as string;
+
   return (
     <div className="settings-section">
       <h2>System Settings</h2>
+
+      <div className="setting-item">
+        <span className="setting-label">Default Launcher</span>
+        <div className="setting-control">
+          <LauncherSelect
+            launchers={availableLaunchers}
+            current={currentLauncher}
+            onChange={handleLauncherChange}
+          />
+        </div>
+      </div>
 
       <div className="setting-item">
         <span className="setting-label">Display Enabled</span>

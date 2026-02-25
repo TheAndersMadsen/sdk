@@ -77,6 +77,7 @@ class SettingsService {
                 settingsRegistry.setWebServer(webServer)
                 settingsProvider.setWebServer(webServer)
 
+                // TODO: This seems to cause deadlocks sometimes
                 webServer.start()
 
                 waitForBridgeSystem(TAG, bridge)

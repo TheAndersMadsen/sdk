@@ -621,6 +621,35 @@ input[type="range"]::-moz-range-thumb {
   flex: 1;
 }
 
+/* Select / Dropdown Styles */
+.setting-select {
+  padding: 8px 12px;
+  border: 1px solid #555555;
+  border-radius: 4px;
+  font-size: 14px;
+  background: #404040;
+  color: #e0e0e0;
+  cursor: pointer;
+  min-width: 200px;
+  max-width: 350px;
+}
+
+.setting-select:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.3);
+}
+
+.setting-select:hover {
+  border-color: #666666;
+}
+
+.setting-select option {
+  background: #404040;
+  color: #e0e0e0;
+  padding: 4px 8px;
+}
+
 /* eSIM Help Styles */
 .esim-help {
   margin-top: 24px;

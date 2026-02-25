@@ -24,6 +24,12 @@ class WebSocketClient(private val webSocketProvider: IWebSocketProvider) {
         val webSocket = WebSocket(sessionId, this)
         val session = WebSocketSession(sessionId, this)
 
+        // TODO: Race condition — onOpen resumes the coroutine via Dispatchers.IO
+        // (async dispatch), but onMessage can fire on the Binder thread before the
+        // coroutine resumes and the caller registers their onMessage handler. Messages
+        // arriving between onOpen and handler registration are silently dropped.
+        // Fix: accept message/close handlers as parameters to connect(), or buffer
+        // early messages until handlers are registered.
         val callback = object : IWebSocketCallback.Stub() {
             override fun onOpen(requestId: String, headers: Map<*, *>?) {
                 activeSessions[requestId]?.continuation?.resume(webSocket)

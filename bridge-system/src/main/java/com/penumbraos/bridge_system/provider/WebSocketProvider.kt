@@ -81,6 +81,7 @@ class WebSocketProvider(private val client: OkHttpClient) : IWebSocketProvider.S
             }
         } else {
             Log.e("WebSocketProviderService", "WebSocket not found for requestId: $requestId")
+            throw IllegalStateException("WebSocket not found for requestId: $requestId")
         }
     }
 

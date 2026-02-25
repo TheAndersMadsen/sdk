@@ -119,6 +119,7 @@ class SettingsRegistry(
 
 
     private val humaneDisplayController = HumaneDisplayController(shellClient)
+    private val launcherController = LauncherController(shellClient)
     private val temperatureController = TemperatureController(shellClient)
     private val registryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -203,6 +204,22 @@ class SettingsRegistry(
                 systemSettings["display.humane_enabled"] = false
             }
 
+            // Launcher settings
+            try {
+                val availableLaunchers = launcherController.getAvailableLaunchers()
+                systemSettings["launcher.available"] = availableLaunchers.map { launcher ->
+                    mapOf("label" to launcher.label, "component" to launcher.component)
+                }
+
+                val currentLauncher = launcherController.getCurrentLauncher()
+                systemSettings["launcher.current"] = currentLauncher ?: ""
+                Log.i(TAG, "Loaded launcher settings: current=$currentLauncher, available=${availableLaunchers.size}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load launcher settings", e)
+                systemSettings["launcher.available"] = emptyList<Map<String, String>>()
+                systemSettings["launcher.current"] = ""
+            }
+
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load current Android settings", e)
         }
@@ -210,7 +227,8 @@ class SettingsRegistry(
 
     private fun isAndroidSystemSetting(key: String): Boolean {
         return when (key) {
-            "audio.volume", "audio.muted", "display.humane_enabled", "device.temperature" -> true
+            "audio.volume", "audio.muted", "display.humane_enabled", "device.temperature",
+            "launcher.current", "launcher.available" -> true
             else -> false
         }
     }
@@ -269,6 +287,28 @@ class SettingsRegistry(
                         Log.w(TAG, "Failed to update Humane display state to $enabled")
                     }
                     success
+                }
+
+                "launcher.current" -> {
+                    val componentName = when (value) {
+                        is String -> value
+                        else -> return false
+                    }
+                    Log.i(TAG, "Attempting to set default launcher to $componentName")
+                    val success = launcherController.setDefaultLauncher(componentName)
+                    if (success) {
+                        systemSettings["launcher.current"] = componentName
+                        Log.i(TAG, "Default launcher set to $componentName")
+                    } else {
+                        Log.w(TAG, "Failed to set default launcher to $componentName")
+                    }
+                    success
+                }
+
+                "launcher.available" -> {
+                    // Read-only setting, cannot be changed by clients
+                    Log.w(TAG, "launcher.available is read-only")
+                    false
                 }
 
                 else -> {
@@ -440,6 +480,8 @@ class SettingsRegistry(
             "audio.muted" -> value is Boolean
             "display.humane_enabled" -> value is Boolean
             "device.temperature" -> value is Number // Read-only, but validate type
+            "launcher.current" -> value is String && value.contains("/")
+            "launcher.available" -> false // Read-only
             else -> true // Allow unknown settings for extensibility
         }
     }
