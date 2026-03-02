@@ -13,21 +13,11 @@ import java.lang.reflect.Method
 
 private const val TAG = "AccessoryProvider"
 
-/**
- * Provides battery and accessory state from humane.devicemanager.
- *
- * Uses reflection to call IDeviceManager methods (isConnected, getBatteryState).
- *
- * SELinux on the AI Pin blocks binder `transfer` from shell context to
- * device_manager, so we cannot use push-based subscriptions
- * (subscribeToAccessoryState). Instead, we poll the device manager at a
- * regular interval and notify SDK callbacks when state changes.
- *
- * Stock subscription pattern (from decompiled PowerLevelManager.java):
- *   - Booster (type 0): connection state + battery level
- *   - Charge pad (type 2): connection state only
- *   - Charge case (type 1): connection state only
- */
+private const val STATE_DISCONNECTED = 1
+private const val STATE_CONNECTED = 2
+private const val STATE_MAYBE_CONNECTED = 128
+private const val POLL_INTERVAL_MS = 5000L
+
 class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
 
     private var deviceManagerService: Any? = null
@@ -39,46 +29,16 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
     private var isConnectedMethod: Method
     private var batteryStateClass: Class<*>
 
-    // ─── Cached live state (updated by polling) ───
+    private var boosterLevel: Int = -1
+    private var boosterCharging: Boolean = false
+    private var boosterConnectionState: Int = STATE_DISCONNECTED
+    private var isOnChargePad: Boolean = false
+    private var isInChargeCase: Boolean = false
 
-    /** Booster battery level percent (0-100, or -1 if disconnected) */
-    @Volatile private var boosterLevel: Int = -1
-
-    /** Whether booster is currently charging */
-    @Volatile private var boosterCharging: Boolean = false
-
-    /**
-     * Booster connection state (stock DMAccessoryState values):
-     *   1 = DISCONNECTED
-     *   2 = CONNECTED
-     *   128 = MAYBE_CONNECTED
-     */
-    @Volatile private var boosterConnectionState: Int = STATE_DISCONNECTED
-
-    /** Whether the pin is sitting on the charge pad */
-    @Volatile private var isOnChargePad: Boolean = false
-
-    /** Whether the pin is in the charge case */
-    @Volatile private var isInChargeCase: Boolean = false
-
-    // ─── SDK callbacks ───
-
-    private val sdkCallbacks = mutableListOf<IAccessoryCallback>()
-
-    // ─── Polling ───
+    private val callbacks = mutableListOf<IAccessoryCallback>()
 
     private var pollingThread: Thread? = null
     @Volatile private var pollingActive = false
-
-    companion object {
-        // Stock DMAccessoryState constants
-        const val STATE_DISCONNECTED = 1
-        const val STATE_CONNECTED = 2
-        const val STATE_MAYBE_CONNECTED = 128
-
-        /** Polling interval in milliseconds */
-        const val POLL_INTERVAL_MS = 5_000L
-    }
 
     init {
         val classLoader = getApkClassLoader(context, "humane.experience.settings")
@@ -97,10 +57,10 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
         isConnectedMethod = iDeviceManagerClass.getMethod("isConnected", Int::class.java)
     }
 
-    // ─── IAccessoryProvider implementation ───
-
     override fun getBatteryInfo(): AccessoryBatteryInfo? {
-        ensureConnected()
+        if (deviceManagerService == null || deviceManagerBinder?.isBinderAlive != true) {
+            connectToDeviceManager()
+        }
         if (deviceManagerService == null) return null
 
         return try {
@@ -108,7 +68,8 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
             buildBatteryInfo()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting battery info", e)
-            handleConnectionError()
+            deviceManagerService = null
+            deviceManagerBinder = null
             null
         }
     }
@@ -120,49 +81,38 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
             }
         }, 0)
 
-        sdkCallbacks.add(callback)
-        Log.i(TAG, "Registered callback (total: ${sdkCallbacks.size})")
-
-        // Start polling on first callback registration
+        callbacks.add(callback)
         startPolling()
 
-        // Send initial state immediately
         try {
-            ensureConnected()
+            if (deviceManagerService == null || deviceManagerBinder?.isBinderAlive != true) {
+                connectToDeviceManager()
+            }
             if (deviceManagerService != null) {
                 pollAllAccessoryState()
             }
             callback.onBatteryInfoChanged(buildBatteryInfo())
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to send initial battery info", e)
-            handleConnectionError()
-            // Still send what we have (defaults)
-            try { callback.onBatteryInfoChanged(buildBatteryInfo()) } catch (_: Exception) {}
+            Log.e(TAG, "Failed to send initial battery info", e)
+            deviceManagerService = null
+            deviceManagerBinder = null
         }
     }
 
     override fun deregisterCallback(callback: IAccessoryCallback) {
-        sdkCallbacks.remove(callback)
-        Log.i(TAG, "Deregistered callback (remaining: ${sdkCallbacks.size})")
+        callbacks.remove(callback)
 
-        // Stop polling when no callbacks remain
-        if (sdkCallbacks.isEmpty()) {
+        if (callbacks.count() < 1) {
+            Log.w(TAG, "Deregistering accessory listener")
             stopPolling()
         }
     }
 
-    // ─── Polling loop ───
-
-    /**
-     * Start a background polling thread that queries the device manager
-     * every [POLL_INTERVAL_MS] and notifies callbacks on state changes.
-     */
     private fun startPolling() {
         if (pollingActive) return
         pollingActive = true
 
         pollingThread = Thread({
-            Log.i(TAG, "Polling thread started (interval=${POLL_INTERVAL_MS}ms)")
             while (pollingActive) {
                 try {
                     Thread.sleep(POLL_INTERVAL_MS)
@@ -172,19 +122,23 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
                 if (!pollingActive) break
 
                 try {
-                    ensureConnected()
+                    if (deviceManagerService == null || deviceManagerBinder?.isBinderAlive != true) {
+                        connectToDeviceManager()
+                    }
                     if (deviceManagerService != null) {
                         val changed = pollAllAccessoryState()
                         if (changed) {
-                            notifyCallbacks()
+                            callCallback { callback ->
+                                callback.onBatteryInfoChanged(buildBatteryInfo())
+                            }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.w(TAG, "Poll cycle failed: ${e.message}")
-                    handleConnectionError()
+                    Log.e(TAG, "Poll cycle failed", e)
+                    deviceManagerService = null
+                    deviceManagerBinder = null
                 }
             }
-            Log.i(TAG, "Polling thread stopped")
         }, "AccessoryProvider-poll").also {
             it.isDaemon = true
             it.start()
@@ -195,66 +149,66 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
         pollingActive = false
         pollingThread?.interrupt()
         pollingThread = null
-        Log.i(TAG, "Polling stopped")
     }
 
-    /**
-     * Poll all accessory types and update cached state.
-     * Returns true if any state changed since last poll.
-     */
     private fun pollAllAccessoryState(): Boolean {
         val svc = deviceManagerService ?: return false
         var changed = false
 
-        try {
-            // Poll booster (type 0)
-            val oldBoosterConn = boosterConnectionState
-            val oldBoosterLevel = boosterLevel
-            val oldBoosterCharging = boosterCharging
+        // Booster (type 0)
+        val oldBoosterConn = boosterConnectionState
+        val oldBoosterLevel = boosterLevel
+        val oldBoosterCharging = boosterCharging
 
-            val boosterConnStatus = isConnectedMethod.invoke(svc, 0) as Int
-            boosterConnectionState = boosterConnStatus
+        val boosterConnStatus = isConnectedMethod.invoke(svc, 0) as Int
+        boosterConnectionState = boosterConnStatus
 
-            if (boosterConnStatus == STATE_CONNECTED) {
-                val batteryStateObject = batteryStateClass.getConstructor().newInstance()
-                val result = getBatteryStateMethod.invoke(svc, 0, batteryStateObject) as Int
-                if (result == 0) {
-                    boosterLevel = batteryStateClass.getField("levelPercent").getInt(batteryStateObject)
-                    boosterCharging = batteryStateClass.getField("isCharging").getBoolean(batteryStateObject)
-                }
-            } else {
-                boosterLevel = 0
-                boosterCharging = false
+        if (boosterConnStatus == STATE_CONNECTED) {
+            val batteryStateObject = batteryStateClass.getConstructor().newInstance()
+            val result = getBatteryStateMethod.invoke(svc, 0, batteryStateObject) as Int
+            if (result == 0) {
+                boosterLevel = batteryStateClass.getField("levelPercent").getInt(batteryStateObject)
+                boosterCharging = batteryStateClass.getField("isCharging").getBoolean(batteryStateObject)
             }
-
-            if (oldBoosterConn != boosterConnectionState ||
-                oldBoosterLevel != boosterLevel ||
-                oldBoosterCharging != boosterCharging) {
-                changed = true
-            }
-
-            // Poll charge pad (type 2)
-            val oldPad = isOnChargePad
-            val padStatus = isConnectedMethod.invoke(svc, 2) as Int
-            isOnChargePad = (padStatus == STATE_CONNECTED)
-            if (oldPad != isOnChargePad) changed = true
-
-            // Poll charge case (type 1)
-            val oldCase = isInChargeCase
-            val caseStatus = isConnectedMethod.invoke(svc, 1) as Int
-            isInChargeCase = (caseStatus == STATE_CONNECTED)
-            if (oldCase != isInChargeCase) changed = true
-
-        } catch (e: Exception) {
-            Log.w(TAG, "pollAllAccessoryState failed: ${e.message}")
-            handleConnectionError()
-            throw e
+        } else {
+            boosterLevel = 0
+            boosterCharging = false
         }
+
+        if (oldBoosterConn != boosterConnectionState ||
+            oldBoosterLevel != boosterLevel ||
+            oldBoosterCharging != boosterCharging) {
+            changed = true
+        }
+
+        // Charge pad (type 2)
+        val oldPad = isOnChargePad
+        val padStatus = isConnectedMethod.invoke(svc, 2) as Int
+        isOnChargePad = (padStatus == STATE_CONNECTED)
+        if (oldPad != isOnChargePad) changed = true
+
+        // Charge case (type 1)
+        val oldCase = isInChargeCase
+        val caseStatus = isConnectedMethod.invoke(svc, 1) as Int
+        isInChargeCase = (caseStatus == STATE_CONNECTED)
+        if (oldCase != isInChargeCase) changed = true
 
         return changed
     }
 
-    // ─── Callback notification ───
+    private fun callCallback(withCallback: (IAccessoryCallback) -> Unit) {
+        val callbacksToRemove = mutableListOf<IAccessoryCallback>()
+
+        callbacks.forEach { callback ->
+            safeCallback(TAG, {
+                withCallback(callback)
+            }, onDeadObject = {
+                callbacksToRemove.add(callback)
+            })
+        }
+
+        callbacksToRemove.forEach { callback -> deregisterCallback(callback) }
+    }
 
     private fun buildBatteryInfo(): AccessoryBatteryInfo {
         val isConnected = boosterConnectionState == STATE_CONNECTED
@@ -266,39 +220,6 @@ class AccessoryProvider(context: Context) : IAccessoryProvider.Stub() {
             this.isOnChargePad = this@AccessoryProvider.isOnChargePad
             this.isInChargeCase = this@AccessoryProvider.isInChargeCase
         }
-    }
-
-    private fun notifyCallbacks() {
-        val info = buildBatteryInfo()
-        val dead = mutableListOf<IAccessoryCallback>()
-
-        sdkCallbacks.forEach { cb ->
-            safeCallback(TAG, {
-                cb.onBatteryInfoChanged(info)
-            }, onDeadObject = {
-                dead.add(cb)
-            })
-        }
-
-        dead.forEach { deregisterCallback(it) }
-
-        if (dead.isEmpty()) {
-            Log.d(TAG, "Notified ${sdkCallbacks.size} callbacks: " +
-                "booster=${boosterLevel}% conn=${boosterConnectionState} " +
-                "charging=$boosterCharging pad=$isOnChargePad case=$isInChargeCase")
-        }
-    }
-
-    // ─── Connection management ───
-
-    private fun ensureConnected() {
-        if (deviceManagerService != null && deviceManagerBinder?.isBinderAlive == true) return
-        connectToDeviceManager()
-    }
-
-    private fun handleConnectionError() {
-        deviceManagerService = null
-        deviceManagerBinder = null
     }
 
     private fun connectToDeviceManager() {

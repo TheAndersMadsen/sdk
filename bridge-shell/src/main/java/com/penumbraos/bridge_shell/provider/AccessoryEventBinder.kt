@@ -6,23 +6,10 @@ import android.util.Log
 
 private const val TAG = "AccessoryEventBinder"
 private const val DESCRIPTOR = "humane.devicemanager.IDMAccessoryEventsCallback"
-private const val TRANSACTION_onAccessoryEvent = 1
-private const val TRANSACTION_onBatteryLevelChangeEvent = 2
+private const val TRANSACTION_ON_ACCESSORY_EVENT = 1
+private const val TRANSACTION_ON_BATTERY_LEVEL_CHANGE_EVENT = 2
 private const val INTERFACE_TRANSACTION = 1598968902 // IBinder.INTERFACE_TRANSACTION
 
-/**
- * Raw Binder implementation of humane.devicemanager.IDMAccessoryEventsCallback.
- *
- * This bypasses reflection-based proxy issues by implementing the exact same
- * binder wire protocol as the stock IDMAccessoryEventsCallback.Stub. The
- * humane.devicemanager service doesn't check the Java class — it only
- * transacts on the binder using the DESCRIPTOR and transaction codes.
- *
- * From decompiled IDMAccessoryEventsCallback.Stub.onTransact():
- *   - Transaction 1 (onAccessoryEvent): reads two ints (from, to)
- *   - Transaction 2 (onBatteryLevelChangeEvent): reads two ints (fromLevel, toLevel)
- *   - Both enforce interface token "humane.devicemanager.IDMAccessoryEventsCallback"
- */
 class AccessoryEventBinder(
     private val onAccessoryEvent: (from: Int, to: Int) -> Unit,
     private val onBatteryLevelChangeEvent: (fromLevel: Int, toLevel: Int) -> Unit,
@@ -38,7 +25,7 @@ class AccessoryEventBinder(
                 reply?.writeString(DESCRIPTOR)
                 true
             }
-            TRANSACTION_onAccessoryEvent -> {
+            TRANSACTION_ON_ACCESSORY_EVENT -> {
                 data.enforceInterface(DESCRIPTOR)
                 val from = data.readInt()
                 val to = data.readInt()
@@ -46,7 +33,7 @@ class AccessoryEventBinder(
                 onAccessoryEvent(from, to)
                 true
             }
-            TRANSACTION_onBatteryLevelChangeEvent -> {
+            TRANSACTION_ON_BATTERY_LEVEL_CHANGE_EVENT -> {
                 data.enforceInterface(DESCRIPTOR)
                 val fromLevel = data.readInt()
                 val toLevel = data.readInt()
