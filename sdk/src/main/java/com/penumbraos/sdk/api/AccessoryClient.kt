@@ -3,6 +3,7 @@ package com.penumbraos.sdk.api
 import android.util.Log
 import com.penumbraos.bridge.IAccessoryProvider
 import com.penumbraos.bridge.callback.IAccessoryCallback
+import com.penumbraos.bridge.types.AccessoryBatteryInfo as AidlAccessoryBatteryInfo
 import com.penumbraos.sdk.api.types.AccessoryBatteryReceiver
 import com.penumbraos.sdk.api.types.BoosterBatteryInfo
 import java.util.concurrent.ConcurrentHashMap
@@ -25,7 +26,7 @@ class AccessoryClient(private val accessoryProvider: IAccessoryProvider) {
 
     fun register(receiver: AccessoryBatteryReceiver) {
         val callbackStub = object : IAccessoryCallback.Stub() {
-            override fun onBatteryInfoChanged(info: com.penumbraos.bridge.types.AccessoryBatteryInfo) {
+            override fun onBatteryInfoChanged(info: AidlAccessoryBatteryInfo) {
                 receiver.onBatteryInfoChanged(BoosterBatteryInfo.fromAidl(info))
             }
         }
